@@ -6,6 +6,10 @@ package frc.robot;
 
 import java.util.function.BooleanSupplier;
 
+import org.littletonrobotics.junction.Logger;
+
+import com.pathplanner.lib.commands.PathPlannerAuto;
+
 import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
@@ -24,8 +28,8 @@ public class RobotContainer {
 
   private final TankSubsystem tank = new TankSubsystem();
 
-  // IMPORTANTE: o "driver" precisa ser CommandPS4Controller (botões sem EventLoop).
-  // O "driverget" é o PS4Controller normal, usado só para ler eixos.
+  // "driver" = CommandPS4Controller (botões sem EventLoop).
+  // "driverget" = PS4Controller normal, usado só para ler eixos.
   private final CommandPS4Controller driver = new CommandPS4Controller(0);
   private final PS4Controller driverget = new PS4Controller(0);
 
@@ -39,13 +43,16 @@ public class RobotContainer {
   private static final double STICK_THRESHOLD = 0.15;
   private static final double ROTATION_DEADBAND = 0.10;
 
+  // Detecção automática da faixa dos gatilhos (-1..1 ou 0..1)
+  private boolean r2Bipolar = false;
+  private boolean l2Bipolar = false;
+
   public RobotContainer() {
 
     autoChooser.setDefaultOption("Nenhum", Commands.none());
     autoChooser.addOption("Quadrado", Autos.quadrado(tank));
     autoChooser.addOption("Reto", Autos.reto(tank));
     autoChooser.addOption("autoZigZag", Autos.autoZigZag(tank));
-    // autoChooser.addOption("Algae_3", Autos.Algae_3(tank));
 
     SmartDashboard.putData("Auto Selector", autoChooser);
 
@@ -61,12 +68,12 @@ public class RobotContainer {
       double forward = getR2();
       double backward = getL2();
 
-      // Debug: confira estes valores no AdvantageScope com o controle parado
-      SmartDashboard.putNumber("PS4/R2", forward);
-      SmartDashboard.putNumber("PS4/L2", backward);
-      SmartDashboard.putNumber("PS4/RightX", driver.getRightX());
-      SmartDashboard.putNumber("PS4/LeftX", leftX);
-      SmartDashboard.putNumber("PS4/LeftY", leftY);
+      // Debug: com o controle parado, todos devem ficar em 0
+      Logger.recordOutput("PS4/R2", forward);
+      Logger.recordOutput("PS4/L2", backward);
+      Logger.recordOutput("PS4/RightX", driver.getRightX());
+      Logger.recordOutput("PS4/LeftX", leftX);
+      Logger.recordOutput("PS4/LeftY", leftY);
 
       // Joystick esquerdo sendo utilizado
       if (joystickMagnitude > STICK_THRESHOLD) {
@@ -101,25 +108,14 @@ public class RobotContainer {
     // Xbox back -> PS4 share
     driver.share().onTrue(Commands.runOnce(() -> mSimHand.setAngle(0, 3)));
 
-    /*
-     * Positivo = Depositar
-     * Negativo = Coletar
-     */
     coletar_Ground();
     autoHand();
     // deposit_Pose();
 
     // Xbox Y -> PS4 triângulo
-    driver.triangle().onTrue(deposit());
+    driver.triangle().onTrue(tank.depositFuelCommand());
 
   }
-
-  // Detecção automática da faixa dos gatilhos:
-  // - Controle real/DS: repouso em -1 (faixa -1..1)
-  // - Controle não detectado ou faixa 0..1: repouso em 0
-  // Assim, controle desconectado = robô parado (e não "frente - ré = 0.5 - 0.5").
-  private boolean r2Bipolar = false;
-  private boolean l2Bipolar = false;
 
   /** Gatilho direito (R2) normalizado de 0 a 1. */
   private double getR2() {
@@ -140,30 +136,43 @@ public class RobotContainer {
   }
 
   void coletar_Ground() {
+
     // Xbox leftBumper -> PS4 L1
-    driver.L1().whileTrue(
-        mSimIntake.CMDintakeOn().onlyIf(() -> !tank.isFuelInsideRobot() && SimElevator.getRealPosition() >= 200));
+    driver.L1().whileTrue(mSimIntake.CMDintakeOn().onlyIf(() -> !tank.isFuelInsideRobot()));
     driver.L1().whileFalse(mSimIntake.CMDintakeOff());
+
+    /*
+     * driver.L1().onTrue(
+     * mSimElevator.CMDsetPosition(0, 3)
+     * .alongWith(Commands.runOnce(() -> mSimHand.setAngle(0, 3))));
+     * driver.L1().onFalse(
+     * mSimElevator.CMDsetPosition(400, 10)
+     * );
+     */
   }
 
   void autoHand() {
 
-    BooleanSupplier autoHandOk = () -> tank.isFuelInsideRobot() && !tank.isHandCollected();
+    new Trigger(tank::isFuelInsideRobot).onTrue(
+        Commands.runOnce(() -> mSimHand.setAngle(0, 3))
+            .andThen(Commands.waitSeconds(0.5))
+            .andThen(mSimElevator.CMDsetPosition(0, 3))
+            .onlyIf(() -> {
+              double pos = mSimElevator.getRawPosition();
+              boolean mao = tank.isHandCollected();
 
-    onCommandCondition(autoHandOk, Commands.sequence(
-        mSimElevator.CMDsetPosition(400, 3),
-        Commands.waitUntil(() -> SimElevator.getRealPosition() > 390),
-        mSimHand.CMDsetAngle(0, 3),
-        Commands.waitUntil(() -> Math.abs(SimHand.getRealAngle()) < 5),
-        mSimElevator.CMDsetPosition(0, 3),
-        mSimHand.CMDsetVelocity(-1),
-        Commands.waitSeconds(1),
-        mSimHand.CMDsetVelocity(0)));
+              Logger.recordOutput("AutoHand/PosNoOnlyIf", pos);
+              Logger.recordOutput("AutoHand/MaoOcupadaNoOnlyIf", mao);
 
+              return pos > 0.01 && !mao;
+            }));
+
+    // Soltou o L1 -> sobe o elevador
+    driver.L1().onFalse(mSimElevator.CMDsetPosition(400, 10));
   }
 
   public Command getAutonomousCommand() {
-    return autoChooser.getSelected();
+    return new PathPlannerAuto("Auto");
   }
 
   public double getLeftJoystickAngle() {
